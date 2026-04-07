@@ -8,7 +8,7 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
 from ryu.lib import hub
 
-from apps.api import RestApiController  # /api/v1 routes
+from app.api import RestApiController  # /api/v1 routes
 
 
 class MitigationEngine(simple_switch_13.SimpleSwitch13):
