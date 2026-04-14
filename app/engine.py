@@ -7,18 +7,11 @@ from ryu.app.wsgi import WSGIApplication
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
 from ryu.lib import hub
+from ryu.lib.packet import packet, ethernet, ether_types
 
 from app.api import RestApiController  # /api/v1 routes
 
-
 class MitigationEngine(simple_switch_13.SimpleSwitch13):
-	"""
-	WSGI (Web Server Gateway Interface) is a standard 
-	Python interface that defines how a 
-	web server/server component hands an HTTP request 
-    to a Python web application, and how the app 
-    returns a response.
-	"""
 	_CONTEXTS = {'wsgi': WSGIApplication}
 
 	def __init__(self, *args, **kwargs):
@@ -27,51 +20,48 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 		# Track datapaths: dpid(int) -> datapath
 		self.switches = {}
 
-		# REST will read/write these
+		# REST-visible config/state
 		self.start_time = time.time()
 		self.config = {
 			"window_seconds": 5,
 			"packet_in_rate_threshold": 200.0,
+			"table_miss_rate_threshold": 200.0,
 			"consecutive_windows": 2,
+			"alert_cooldown_seconds": 5,
 			"mitigation_mode": "auto",
 		}
 		self.metrics = {}
 		self.alerts = deque(maxlen=200)
 		self.mitigation_log = deque(maxlen=500)
 
-		# PacketIn + Miss Tracking
-		self._pktin_times = defaultdict(lambda: deque(maxlen=200000)) # dpid(str) -> [ts...]
-		self._miss_times = defaultdict(lambda: deque(maxlen=200000)) # dpid(str) -> [ts...]
-		self._streak = defaultdict(int) # dpid(str) -> consecutive windows
-		self._last_alert_ts = defaultdict(lambda: 0.0)
-
 		# Detection on/off
 		self.detection_enabled = True
 
-		# Cookie to identify PacketIns caused by our table-miss flow
+		# PacketIn + Miss Tracking
+		self._pktin_times = defaultdict(lambda: deque(maxlen=200000))  # dpid(str) -> [ts...]
+		self._miss_times = defaultdict(lambda: deque(maxlen=200000))   # dpid(str) -> [ts...]
+		self._streak = defaultdict(int) # dpid(str) -> consecutive windows
+		self._last_alert_ts = defaultdict(lambda: 0.0)
+
+		# Cookie to identify PacketIns caused by table-miss flow
 		self._TABLE_MISS_COOKIE = 0xA11CE
 
-		# Register the REST controller and pass THIS instance
+		# OpenFlow stats delta tracking
+		self._port_bytes_prev = defaultdict(dict)  # dpid(int) -> {port_no: (rx_bytes, tx_bytes, ts)}
+		self._flow_count_prev = defaultdict(lambda: (0, 0.0))
+
+		# Register REST controller (WSGI) and pass THIS instance
 		wsgi = kwargs['wsgi']
 		wsgi.register(RestApiController, {"engine": self})
 
-		# dpid -> {port_no: (rx_bytes, tx_bytes, ts)}
-		# need to store: Port stats from OpenFlow are cumulative totals, not rates
-		self._port_bytes_prev = defaultdict(dict)
-
-		# prev flow table sizes: dpid -> (flow_count, ts)
-		# allows to calculate: low table growth rate, spikes, flow churn
-		self._flow_count_prev = defaultdict(lambda: (0, 0.0))
-
-		# Start background monitoring loop - continuous
-		# prunes timestamps, packet in rate, update self.metrics
+		# Start background monitoring loop
 		self._monitor_thread = hub.spawn(self._monitor_loop)
 
 	@set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
 	def switch_features_handler(self, ev):
-		# Call the base class handler (installs table-miss, etc.)
-		super(MitigationEngine, self).switch_features_handler(ev)
-
+		"""
+		We install exactly one table-miss rule with our cookie so miss counting works consistently.
+		"""
 		dp = ev.msg.datapath
 		ofp = dp.ofproto
 		parser = dp.ofproto_parser
@@ -95,16 +85,36 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 
 	@set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
 	def _packet_in_handler(self, ev):
-		# Track PacketIn timestamps for Monitoring
+		"""
+		Track overall PacketIn rate and a robust definition of "table miss":
+		1) If msg.cookie matches our table-miss cookie => miss
+		2) Fallback: if dst MAC isn't learned yet => miss
+		"""
 		msg = ev.msg
 		dp = msg.datapath
 		now = time.time()
-
 		dpid = str(dp.id)
+
+		# Track PacketIn timestamps
 		self._pktin_times[dpid].append(now)
 
-		# Count "miss PacketIns" when the cookie matches the table-miss flow
+		# Determine if this PacketIn is from a miss
+		is_miss = False
+
+		# Cookie match
 		if getattr(msg, "cookie", None) == self._TABLE_MISS_COOKIE:
+			is_miss = True
+		else:
+			# Fallback: parse Ethernet + check if destination is learned
+			pkt = packet.Packet(msg.data)
+			eth = pkt.get_protocol(ethernet.ethernet)
+			if eth and eth.ethertype != ether_types.ETH_TYPE_LLDP:
+				dst = eth.dst
+				mac_table = self.mac_to_port.get(dp.id, {})
+				if dst not in mac_table:
+					is_miss = True
+
+		if is_miss:
 			self._miss_times[dpid].append(now)
 
 		# Preserve L2 learning switch behavior
@@ -131,13 +141,11 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 		dpid = str(dp.id)
 		now = time.time()
 
-		# Compute per-port rx/tx rates based on byte deltas
 		per_port = {}
 		prev_map = self._port_bytes_prev[dp.id]
 
 		for stat in ev.msg.body:
 			port_no = stat.port_no
-
 			rx_bytes = stat.rx_bytes
 			tx_bytes = stat.tx_bytes
 
@@ -167,21 +175,16 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 		})
 
 	def get_switch_dpids(self):
-		# Helper for REST routes
-		return sorted([str(dpid) for dpid in self.switches.keys()])
-	
+		return sorted([str(dpid) for dpid in self.switches.keys()], key=lambda s: int(s))
+
 	def _monitor_loop(self):
-		"""
-		Every second:
-		- compute packet_in_rate from timestamps
-		- periodically request flow/port stats from switches
-		"""
 		last_stats_poll = 0.0
 
 		while True:
-			# Update Metrics
 			now = time.time()
-			self._update_packet_in_metrics(now)
+
+			# Update Metrics
+			self._update_rate_metrics(now)
 
 			# Run Detection
 			for dpid_int in list(self.switches.keys()):
@@ -195,7 +198,7 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 
 			hub.sleep(1)
 
-	def _update_packet_in_metrics(self, now: float):
+	def _update_rate_metrics(self, now: float):
 		window = float(self.config.get("window_seconds", 5))
 
 		for dpid_int in list(self.switches.keys()):
@@ -208,7 +211,7 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 			pktin_count = len(pq)
 			pktin_rate = (pktin_count / window) if window > 0 else 0.0
 
-			# Table-miss rate
+			# Table-miss rate (cookie or dst-not-learned fallback)
 			mq = self._miss_times[dpid]
 			while mq and (now - mq[0]) > window:
 				mq.popleft()
@@ -230,8 +233,8 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 			"last_updated": now,
 			"connected_switches": len(self.switches),
 		})
-	
-	# -------- Detection Event Handlers -------------
+
+	# -------- Detection Event Handler -------------
 	def _run_detection(self, dpid: str, now: float):
 		if not self.detection_enabled:
 			self._streak[dpid] = 0
@@ -274,18 +277,8 @@ class MitigationEngine(simple_switch_13.SimpleSwitch13):
 			self._last_alert_ts[dpid] = now
 
 	def _request_stats(self, dp):
-		"""
-		Send OpenFlow stats requests:
-		- Flow stats for flow table occupancy
-		- Port stats for tx/rx rates
-		"""
 		ofp = dp.ofproto
 		parser = dp.ofproto_parser
 
-		# Flow stats
-		flow_req = parser.OFPFlowStatsRequest(dp)
-		dp.send_msg(flow_req)
-
-		# Port stats (ALL ports)
-		port_req = parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY)
-		dp.send_msg(port_req)
+		dp.send_msg(parser.OFPFlowStatsRequest(dp))
+		dp.send_msg(parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY))

@@ -9,123 +9,96 @@ APP_NAME = "sdn_mitigation_engine"
 BASE = "/api/v1"
 
 class RestApiController(ControllerBase):
-    def __init__(self, req, link, data, **config):
-        """
-        We are able to pull our engine instance from engine.py,
-        thus accessing the defined functions within that
-        instance. 
-        
-        This is possible via WSGI.
-        """
-        super().__init__(req, link, data, **config)
-        self.engine = data["engine"]
+	def __init__(self, req, link, data, **config):
+		super().__init__(req, link, data, **config)
+		self.engine = data["engine"]
 
-    def _json(self, obj, status=200):
-        body = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
-        return Response(content_type="application/json", body=body, status=status)
-    
-    def _get_datapath_dict(self):
-        """
-        Returns: dict[int, datapath]
-        """
-        if hasattr(self.engine, "switches") and isinstance(self.engine.switches, dict):
-            return self.engine.switches
-        return {}
+	def _json(self, obj, status=200):
+		body = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
+		return Response(content_type="application/json", body=body, status=status)
 
-    # --------- Monitoring APIs ------------
-    @route(APP_NAME, BASE + "/health", methods=["GET"])
-    def health(self, req, **kwargs):
-        """
-        Checks if the server is running and able to respond
+	# --------- Monitoring APIs ------------
+	@route(APP_NAME, BASE + "/health", methods=["GET"])
+	def health(self, req, **kwargs):
+		dpids = self.engine.get_switch_dpids()
+		ok = True
+		problems = []
 
-        GET: sdn_mitigation_engine/api/v1/health
-        """
-        dpids = self.engine.get_switch_dpids()
-        ok = True
-        problems = []
+		if len(dpids) == 0:
+			ok = False
+			problems.append("no switches connected")
 
-        if len(dpids) == 0:
-            ok = False
-            problems.append("no switches connected")
-        return self._json({"ok": ok, "problems": problems})
+		return self._json({"ok": ok, "problems": problems})
 
-    @route(APP_NAME, BASE + "/switches", methods=["GET"])
-    def switches(self, req, **kwargs):
-        """
-        List connected switches (dpids).
-        """
-        return self._json({"switches": self.engine.get_switch_dpids()})
-	
-    @route(APP_NAME, BASE + "/status", methods=["GET"])
-    def status(self, req, **kwargs):
-        """
-        LATER: return detection and mitigation status/rates
-        """
-        return self._json({
-            "time": time.time(),
-            "switches": self.engine.get_switch_dpids(),
-        })
-    
-    @route(APP_NAME, BASE + "/metrics", methods=["GET"])
-    def metrics(self, req, **kwargs):
-        """
-        Default: Return all Metrics
-        - packet_in_rate
-        - table-miss rate
-        - flow table occupancy
-        - port stats
+	@route(APP_NAME, BASE + "/switches", methods=["GET"])
+	def switches(self, req, **kwargs):
+		return self._json({"switches": self.engine.get_switch_dpids()})
 
-        dpid Specified: Return only the metrics for that dpid
-        GET: sdn_mitigation_engine/api/v1/health?dpid={dpid}
-        """
-        dpid = req.params.get("dpid")
-        if dpid:
-            return self._json({dpid: self.engine.metrics.get(dpid, {})})
-        return self._json(self.engine.metrics)
-    
-    # ---------- Detection APIs -----------
-    @route(APP_NAME, BASE + "/alerts", methods=["GET"])
-    def alerts(self, req, **kwargs):
-        return self._json(list(getattr(self.engine, "alerts", [])))
+	@route(APP_NAME, BASE + "/status", methods=["GET"])
+	def status(self, req, **kwargs):
+		return self._json({
+			"time": time.time(),
+			"switches": self.engine.get_switch_dpids(),
+			"detection_enabled": getattr(self.engine, "detection_enabled", True),
+		})
 
-    @route(APP_NAME, BASE + "/alerts", methods=["DELETE"])
-    def clear_alerts(self, req, **kwargs):
-        if hasattr(self.engine, "alerts"):
-            self.engine.alerts.clear()
-        return self._json({"ok": True})
+	@route(APP_NAME, BASE + "/metrics", methods=["GET"])
+	def metrics(self, req, **kwargs):
+		"""
+		Default: Return all metrics
+			GET /api/v1/metrics
 
-    @route(APP_NAME, BASE + "/detection/status", methods=["GET"])
-    def detection_status(self, req, **kwargs):
-        return self._json({
-            "detection_enabled": getattr(self.engine, "detection_enabled", True),
-            "config": getattr(self.engine, "config", {}),
-        })
+		DPID specified:
+			GET /api/v1/metrics?dpid=<dpid>
+		"""
+		dpid = req.params.get("dpid")
+		if dpid:
+			return self._json({dpid: self.engine.metrics.get(dpid, {})})
+		return self._json(self.engine.metrics)
 
-    @route(APP_NAME, BASE + "/detection/mode", methods=["POST"])
-    def detection_mode(self, req, **kwargs):
-        body = req.json if req.body else {}
-        if not isinstance(body, dict):
-            return self._json({"ok": False, "error": "JSON body must be an object"}, status=400)
+	# ---------- Detection APIs -----------
+	@route(APP_NAME, BASE + "/alerts", methods=["GET"])
+	def alerts(self, req, **kwargs):
+		return self._json(list(getattr(self.engine, "alerts", [])))
 
-        enabled = body.get("enabled")
-        if not isinstance(enabled, bool):
-            return self._json({"ok": False, "error": "enabled must be true/false"}, status=400)
+	@route(APP_NAME, BASE + "/alerts", methods=["DELETE"])
+	def clear_alerts(self, req, **kwargs):
+		if hasattr(self.engine, "alerts"):
+			self.engine.alerts.clear()
+		return self._json({"ok": True})
 
-        self.engine.detection_enabled = enabled
-        return self._json({"ok": True, "detection_enabled": self.engine.detection_enabled})
+	@route(APP_NAME, BASE + "/detection/status", methods=["GET"])
+	def detection_status(self, req, **kwargs):
+		return self._json({
+			"detection_enabled": getattr(self.engine, "detection_enabled", True),
+			"config": getattr(self.engine, "config", {}),
+		})
 
-    @route(APP_NAME, BASE + "/config", methods=["GET"])
-    def get_config(self, req, **kwargs):
-        return self._json(getattr(self.engine, "config", {}))
+	@route(APP_NAME, BASE + "/detection/mode", methods=["POST"])
+	def detection_mode(self, req, **kwargs):
+		body = req.json if req.body else {}
+		if not isinstance(body, dict):
+			return self._json({"ok": False, "error": "JSON body must be an object"}, status=400)
 
-    @route(APP_NAME, BASE + "/config", methods=["POST"])
-    def set_config(self, req, **kwargs):
-        body = req.json if req.body else {}
-        if not isinstance(body, dict):
-            return self._json({"ok": False, "error": "JSON body must be an object"}, status=400)
+		enabled = body.get("enabled")
+		if not isinstance(enabled, bool):
+			return self._json({"ok": False, "error": "enabled must be true/false"}, status=400)
 
-        if not hasattr(self.engine, "config") or not isinstance(self.engine.config, dict):
-            return self._json({"ok": False, "error": "engine has no config dict"}, status=500)
+		self.engine.detection_enabled = enabled
+		return self._json({"ok": True, "detection_enabled": self.engine.detection_enabled})
 
-        self.engine.config.update(body)
-        return self._json({"ok": True, "config": self.engine.config})
+	@route(APP_NAME, BASE + "/config", methods=["GET"])
+	def get_config(self, req, **kwargs):
+		return self._json(getattr(self.engine, "config", {}))
+
+	@route(APP_NAME, BASE + "/config", methods=["POST"])
+	def set_config(self, req, **kwargs):
+		body = req.json if req.body else {}
+		if not isinstance(body, dict):
+			return self._json({"ok": False, "error": "JSON body must be an object"}, status=400)
+
+		if not hasattr(self.engine, "config") or not isinstance(self.engine.config, dict):
+			return self._json({"ok": False, "error": "engine has no config dict"}, status=500)
+
+		self.engine.config.update(body)
+		return self._json({"ok": True, "config": self.engine.config})
