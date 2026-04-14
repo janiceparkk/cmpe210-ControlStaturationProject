@@ -38,7 +38,7 @@ mininet> pingall
 To simulate a table miss attack storm, run:
 ```
 $ chmod +x ./scripts/attack_miss_storm.py
-mininet> h3 python3 scripts/attack_miss_storm.py --iface h3-eth0 --target 10.0.0.1 --pps 500 --seconds 5
+mininet> h3 python3 scripts/attack_miss_storm.py --iface h3-eth0 --target 10.0.0.1 --seconds 8 --pps 2000 --burst 200 --random_src_mac
 ```
 
 ## How to Monitor the Traffic
@@ -53,6 +53,8 @@ $ curl -s http://127.0.0.1:8080/api/v1/alerts | python3 -m json.tool
 ```
 $ curl -s http://127.0.0.1:8080/api/v1/metrics | python3 -m json.tool
 $ curl -s http://127.0.0.1:8080/api/v1/alerts | python3 -m json.tool
+
+$ watch -n 1 'curl -s http://127.0.0.1:8080/api/v1/metrics | head -n 120'
 ```
 
 If the commands above don't trigger/log the alerts, it may be because your VM may not achieve high pps with Scapy. Lower thresholds temporarily:

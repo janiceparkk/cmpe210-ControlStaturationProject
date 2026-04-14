@@ -78,19 +78,16 @@ start_ryu() {
 	echo "[*] Starting Ryu controller: ${RYU_APP} on ${CTRL_IP}:${CTRL_PORT}"
 	: > ryu.log
 
-	# Prefer python -m so it works even when ryu-manager isn't on PATH
-	if command -v ryu-manager >/dev/null 2>&1; then
-		ryu-manager "${RYU_APP}" --ofp-tcp-listen-port "${CTRL_PORT}" > ryu.log 2>&1 &
-	else
-		python3 -m ryu.cmd.manager "${RYU_APP}" --ofp-tcp-listen-port "${CTRL_PORT}" > ryu.log 2>&1 &
-	fi
+	# Ensure we run from the project root (directory where topo_setup.sh lives)
+	cd "$(dirname "$0")"
 
+	# Start with the same method that works manually
+	PYTHONPATH="$PWD" python3 -m ryu.cmd.manager "${RYU_APP}" --ofp-tcp-listen-port "${CTRL_PORT}" > ryu.log 2>&1 &
 	RYU_PID=$!
-	sleep 1
 
-	# If the process died, show the log and exit hard
+	sleep 1
 	if ! kill -0 "${RYU_PID}" >/dev/null 2>&1; then
-		echo "[!] Ryu failed to start (process exited). Showing ryu.log:"
+		echo "[!] Ryu failed to start. Showing ryu.log:"
 		echo "------------------------------------------------------------"
 		tail -n 200 ryu.log || true
 		echo "------------------------------------------------------------"
