@@ -76,8 +76,24 @@ cleanup_mininet() {
 
 start_ryu() {
 	echo "[*] Starting Ryu controller: ${RYU_APP} on ${CTRL_IP}:${CTRL_PORT}"
-	ryu-manager "${RYU_APP}" --ofp-tcp-listen-port "${CTRL_PORT}" > ryu.log 2>&1 &
+	: > ryu.log
+
+	# Ensure we run from the project root (directory where topo_setup.sh lives)
+	cd "$(dirname "$0")"
+
+	# Start with the same method that works manually
+	PYTHONPATH="$PWD" python3 -m ryu.cmd.manager "${RYU_APP}" --ofp-tcp-listen-port "${CTRL_PORT}" > ryu.log 2>&1 &
 	RYU_PID=$!
+
+	sleep 1
+	if ! kill -0 "${RYU_PID}" >/dev/null 2>&1; then
+		echo "[!] Ryu failed to start. Showing ryu.log:"
+		echo "------------------------------------------------------------"
+		tail -n 200 ryu.log || true
+		echo "------------------------------------------------------------"
+		exit 1
+	fi
+
 	echo "[*] Ryu PID: ${RYU_PID} (logging to ./ryu.log)"
 }
 
