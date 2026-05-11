@@ -70,6 +70,67 @@ Also make sure to clear alerts between runs:
 $ curl -s -X DELETE http://127.0.0.1:8080/api/v1/alerts | python3 -m json.tool
 ```
 
+## Mitigation Control APIs
+Below are commands to manually call the mitigation api. The following command installs a high priority OpenFlow rule to drop traffic from the attacker (h3)
+```
+$ curl -s -X POST http://127.0.0.1:8080/api/v1/mitigate \
+  -H "Content-Type: application/json" \
+  -d '{"dpid":"1","src_ip":"10.0.0.3","action":"drop"}' \
+  | python3 -m json.tool
+```
+Installed flow rules can be dropped or removed through unmitigate
+```
+$ curl -s -X POST http://127.0.0.1:8080/api/v1/unmitigate \
+  -H "Content-Type: application/json" \
+  -d '{"dpid":"1"}' \
+  | python3 -m json.tool
+```
+Instead of dropping traffic, limiting traffic can manually done
+```
+$ curl -s -X POST http://127.0.0.1:8080/api/v1/mitigate \
+  -H "Content-Type: application/json" \
+  -d '{"dpid":"1","action":"meter","rate_kbps":2000}' \
+  | python3 -m json.tool
+```
+To view all the mitigation actions (manual and automatic)
+```
+$ curl -s http://127.0.0.1:8080/api/v1/mitigation/log | python3 -m json.tool
+```
+
+## Automatic Mitigation
+
+If `mitigation_mode` is set to `"auto"` (default), mitigation is triggered automatically when detection thresholds are exceeded.
+
+Workflow:
+1. Attack generates high PacketIn / table-miss rates  
+2. Detection logic identifies abnormal behavior  
+3. Alert is generated  
+4. Controller automatically installs a mitigation rule (drop or meter)  
+5. Action is recorded in mitigation log and report  
+
+---
+
+## Analysis Reports APIs
+
+Each mitigation event generates a report folder with a report containing:
+- Detection metrics
+- Attack source(s)
+- Mitigation action
+- Recent alerts
+
+To view the available reports
+```
+$ curl -s http://127.0.0.1:8080/api/v1/reports | python3 -m json.tool
+```
+To get further details on a specific report
+```
+$ curl -s http://127.0.0.1:8080/api/v1/reports/<report_id> | python3 -m json.tool
+```
+To download the report in a specific format
+```
+$ curl -s http://127.0.0.1:8080/api/v1/reports/<report_id>/download?format=<json,csv,or xml> | python3 -m json.tool
+```
+
 ## Trouble Shooting
 Check the Ports
 ```
