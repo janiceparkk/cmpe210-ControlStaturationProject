@@ -108,6 +108,13 @@ Workflow:
 4. Controller automatically installs a mitigation rule (drop or meter)  
 5. Action is recorded in mitigation log and report  
 
+In the case you want to disable the automatic detection and mitigation module to simulate or view the network under a flooding attack
+```
+$ curl -s -X POST http://127.0.0.1:8080/api/v1/detection/mode \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}' \
+  | python3 -m json.tool
+```
 ---
 
 ## Analysis Reports APIs
@@ -126,7 +133,7 @@ To get further details on a specific report
 ```
 $ curl -s http://127.0.0.1:8080/api/v1/reports/<report_id> | python3 -m json.tool
 ```
-To download the report in a specific format
+To download and view the report in a specific format
 ```
 $ curl -s http://127.0.0.1:8080/api/v1/reports/<report_id>/download?format=<json,csv,or xml> | python3 -m json.tool
 ```
